@@ -86,7 +86,7 @@ class AsyncTaskQueueManager:
 
         self._is_running = True
         self._retry_monitor_task = asyncio.create_task(self._retry_monitor_loop())
-        print("🔧 任务管理器已启动")
+        logger.info("🔧 任务管理器已启动")
 
     async def stop(self):
         """停止管理器"""
@@ -101,7 +101,7 @@ class AsyncTaskQueueManager:
             except asyncio.CancelledError:
                 pass
         self._thread_pool.shutdown(wait=True)
-        print("🔧 任务管理器已停止")
+        logger.info("🔧 任务管理器已停止")
 
     async def submit_single_task(
         self, task_kwargs: Dict[str, Any], task_id: str = None
@@ -120,7 +120,7 @@ class AsyncTaskQueueManager:
         task_info = TaskInfo(id=task_id, kwargs=task_kwargs, status=TaskStatus.PENDING)
         self.tasks[task_id] = task_info
 
-        print(f"📤 提交任务 {task_id}")
+        logger.info("📤 提交任务 %s", task_id)
         await self._print_status()
 
         try:
@@ -157,15 +157,18 @@ class AsyncTaskQueueManager:
                     task_info.error = e
                     task_info.end_time = time.time()
                     self.server_error_count[task_info.server_id] += 1
-                    print(f"💥 任务 {task_info.id} 最终失败")
+                    logger.info("💥 任务 %s 最终失败", task_info.id)
                     await self._print_status()
                     raise e
 
                 # 将任务加入重试队列，等待有任务完成
                 task_info.status = TaskStatus.WAITING_FOR_RESOURCE
                 await self._retry_queue.put(task_info)
-                print(
-                    f"🔄 任务 {task_info.id} 加入重试队列 (重试 {task_info.retry_count}/{self.max_retries})"
+                logger.info(
+                    "🔄 任务 %s 加入重试队列 (重试 %d/%d)",
+                    task_info.id,
+                    task_info.retry_count,
+                    self.max_retries,
                 )
                 await self._print_status()
 
@@ -182,8 +185,12 @@ class AsyncTaskQueueManager:
         task_info.start_time = time.time()
         self.server_active_tasks[server_id] += 1
 
-        print(
-            f"🔄 任务 {task_info.id} 在服务器 {server_id} 上执行 (尝试 {task_info.retry_count + 1}/{self.max_retries + 1})"
+        logger.info(
+            "🔄 任务 %s 在服务器 %s 上执行 (尝试 %d/%d)",
+            task_info.id,
+            server_id,
+            task_info.retry_count + 1,
+            self.max_retries + 1,
         )
         await self._print_status()
 
@@ -207,7 +214,7 @@ class AsyncTaskQueueManager:
             self.server_stats[server_id] += 1
 
             duration = task_info.end_time - task_info.start_time
-            print(f"✅ 任务 {task_info.id} 完成 (耗时: {duration:.2f}s)")
+            logger.info("✅ 任务 %s 完成 (耗时: %.2fs)", task_info.id, duration)
 
             # 通知重试监控器有任务完成
             self._signal_task_completion()
@@ -217,7 +224,7 @@ class AsyncTaskQueueManager:
 
         except Exception as e:
             self.server_error_count[server_id] += 1
-            print(f"❌ 任务 {task_info.id} 在服务器 {server_id} 上失败: {e}")
+            logger.info("❌ 任务 %s 在服务器 %s 上失败: %s", task_info.id, server_id, e)
             raise e
 
         finally:
@@ -234,7 +241,7 @@ class AsyncTaskQueueManager:
 
     async def _wait_for_task_completion(self):
         """等待有任务完成（资源释放）"""
-        print("⏳ 等待其他任务完成释放资源...")
+        logger.info("⏳ 等待其他任务完成释放资源...")
         await self._retry_event.wait()
 
     async def _retry_monitor_loop(self):
@@ -250,7 +257,7 @@ class AsyncTaskQueueManager:
                     await asyncio.sleep(0.5)
 
             except Exception as e:
-                print(f"重试监控器错误: {e}")
+                logger.info("重试监控器错误: %s", e)
                 continue
 
     def _get_optimal_server(self, exclude_server: str = None) -> str:
@@ -311,7 +318,7 @@ class AsyncTaskQueueManager:
 
         status_msg += f"\n总任务数: {len(self.tasks)}"
         status_msg += "\n" + "=" * 40
-        print(status_msg)
+        logger.info(status_msg)
 
     def get_task_info(self, task_id: str) -> Optional[TaskInfo]:
         return self.tasks.get(task_id)

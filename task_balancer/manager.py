@@ -124,13 +124,21 @@ class AsyncTaskQueueManager:
         await self._print_status()
 
         try:
-            async with self._semaphore:
+            # 获取信号量，但不要持有它等待重试
+            await self._semaphore.acquire()
+            try:
                 result = await self._execute_task_with_smart_retry(task_info)
                 return result
+            finally:
+                # 确保信号量被释放
+                self._semaphore.release()
         except Exception as e:
             task_info.status = TaskStatus.FAILED
             task_info.error = e
             task_info.end_time = time.time()
+            # 确保信号量被释放
+            if self._semaphore.locked():
+                self._semaphore.release()
             raise e
 
     async def _execute_task_with_smart_retry(self, task_info: TaskInfo) -> Any:
@@ -172,8 +180,13 @@ class AsyncTaskQueueManager:
                 )
                 await self._print_status()
 
-                # 等待有任务完成（资源释放）
-                await self._wait_for_task_completion()
+                # 释放信号量，等待有任务完成（资源释放）
+                self._semaphore.release()
+                try:
+                    await self._wait_for_task_completion()
+                finally:
+                    # 重新获取信号量继续执行
+                    await self._semaphore.acquire()
 
     async def _execute_single_attempt(
         self, task_info: TaskInfo, server_id: str, original_kwargs: Dict
@@ -237,12 +250,25 @@ class AsyncTaskQueueManager:
     def _signal_task_completion(self):
         """通知有任务完成（资源释放）"""
         self._retry_event.set()
-        self._retry_event.clear()  # 立即清除，以便下次等待
+        # 不要立即清除，让等待的任务有机会处理
+        # 清除操作将在等待任务处理完成后进行
 
     async def _wait_for_task_completion(self):
         """等待有任务完成（资源释放）"""
         logger.info("⏳ 等待其他任务完成释放资源...")
-        await self._retry_event.wait()
+        
+        # 设置超时机制，避免永久等待
+        try:
+            await asyncio.wait_for(self._retry_event.wait(), timeout=30.0)
+            # 事件被触发后，清除它以便下次使用
+            self._retry_event.clear()
+        except asyncio.TimeoutError:
+            logger.warning("⏰ 等待资源超时，强制继续执行")
+            # 超时后强制清除事件，避免死锁
+            self._retry_event.clear()
+            # 检查是否有其他任务在运行，如果没有，可能是系统空闲状态
+            if self.get_active_task_count() == 0:
+                logger.info("💡 系统空闲，无需等待资源")
 
     async def _retry_monitor_loop(self):
         """重试监控循环，处理等待重试的任务"""
@@ -250,8 +276,18 @@ class AsyncTaskQueueManager:
             try:
                 # 检查重试队列是否有任务
                 if not self._retry_queue.empty():
-                    # 有任务等待重试，但需要等待有任务完成
-                    await asyncio.sleep(0.1)  # 短暂等待，让主流程处理任务完成信号
+                    # 有任务等待重试，检查是否有可用资源
+                    if self.get_active_task_count() < self.max_parallel_tasks:
+                        # 有可用资源，尝试处理重试队列中的任务
+                        try:
+                            task_info = self._retry_queue.get_nowait()
+                            # 重新提交任务进行重试
+                            asyncio.create_task(self._retry_task(task_info))
+                        except asyncio.QueueEmpty:
+                            pass
+                    else:
+                        # 没有可用资源，等待
+                        await asyncio.sleep(0.1)
                 else:
                     # 没有任务等待重试，稍作等待
                     await asyncio.sleep(0.5)
@@ -259,6 +295,19 @@ class AsyncTaskQueueManager:
             except Exception as e:
                 logger.info("重试监控器错误: %s", e)
                 continue
+
+    async def _retry_task(self, task_info: TaskInfo):
+        """处理重试任务"""
+        try:
+            # 重新执行任务
+            await self._execute_task_with_smart_retry(task_info)
+        except Exception as e:
+            # 重试失败，任务最终失败
+            task_info.status = TaskStatus.FAILED
+            task_info.error = e
+            task_info.end_time = time.time()
+            logger.info("💥 任务 %s 最终失败", task_info.id)
+            await self._print_status()
 
     def _get_optimal_server(self, exclude_server: str = None) -> str:
         """选择最优服务器（考虑错误率和活跃任务数）"""

@@ -4,21 +4,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 import concurrent.futures
-import logging
-
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-if not logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setLevel(logging.INFO)
-    _formatter = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    _handler.setFormatter(_formatter)
-    logger.addHandler(_handler)
+from task_balancer.utils.log_helper import logger
 
 
 class TaskStatus(Enum):

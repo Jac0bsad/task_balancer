@@ -256,7 +256,7 @@ class AsyncTaskQueueManager:
     async def _wait_for_task_completion(self):
         """等待有任务完成（资源释放）"""
         logger.info("⏳ 等待其他任务完成释放资源...")
-        
+
         # 设置超时机制，避免永久等待
         try:
             await asyncio.wait_for(self._retry_event.wait(), timeout=30.0)
@@ -350,11 +350,34 @@ class AsyncTaskQueueManager:
             for server_id in self.available_server_ids
         }
 
+    def _count_completed_tasks(self) -> int:
+        """统计已完成任务数量（以任务最终状态为准）"""
+        return sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
+
+    @staticmethod
+    def _format_progress_bar(current: int, total: int, width: int = 30) -> str:
+        """格式化 tqdm 风格进度条。
+
+        - current: 已完成数量
+        - total: 总数量（0 时返回空进度条）
+        - width: 进度条宽度
+        """
+        if total <= 0:
+            return "|" + "-" * width + "| 0.0% (0/0)"
+
+        ratio = max(0.0, min(1.0, current / total))
+        filled = int(round(width * ratio))
+        p_bar = "|" + "█" * filled + "-" * (width - filled) + "|"
+        percent = ratio * 100
+        return f"{p_bar} {percent:5.1f}% ({current}/{total})"
+
     async def _print_status(self):
         """打印当前状态"""
         active_count = self.get_active_task_count()
         waiting_count = self.get_waiting_task_count()
         server_status = self.get_server_status()
+        total_tasks = len(self.tasks)
+        completed_tasks = self._count_completed_tasks()
 
         status_msg = "\n=== 系统状态 ==="
         status_msg += f"\n活跃任务: {active_count}, 等待重试: {waiting_count}, 最大并行: {self.max_parallel_tasks}"
@@ -365,7 +388,12 @@ class AsyncTaskQueueManager:
                 f"{status['total_completed']}完成, {status['error_count']}错误"
             )
 
-        status_msg += f"\n总任务数: {len(self.tasks)}"
+        # 汇总与进度
+        status_msg += f"\n总任务数: {total_tasks}"
+        status_msg += f"\n总完成数: {completed_tasks}"
+        status_msg += "\n进度: " + self._format_progress_bar(
+            completed_tasks, total_tasks, width=30
+        )
         status_msg += "\n" + "=" * 40
         logger.info(status_msg)
 

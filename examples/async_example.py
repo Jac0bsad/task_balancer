@@ -43,17 +43,20 @@ async def basic_usage_example():
 
     print(f"📤 提交 {len(tasks)} 个任务...")
 
-    # 提交任务并收集结果
-    results = []
-    for i, task_kwargs in enumerate(tasks):
-        try:
-            result = await manager.submit_single_task(
-                task_kwargs=task_kwargs, task_id=f"custom_id_{i}"  # 可选：自定义任务ID
-            )
-            results.append(result)
-            print(f"✅ 任务 {i} 完成: {result}")
-        except Exception as e:
-            print(f"❌ 任务 {i} 失败: {e}")
+    # 并行提交所有任务
+    async_tasks = [
+        manager.submit_single_task(task_args, f"task_{i+1}")
+        for i, task_args in enumerate(tasks)
+    ]
+
+    results = await asyncio.gather(*async_tasks, return_exceptions=True)
+
+    # 处理结果
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            print(f"❌ 任务 {i+1} 失败: {result}")
+        else:
+            print(f"✅ 任务 {i+1} 成功: {result}")
 
     # 显示最终状态
     print("\n📊 最终状态统计:")

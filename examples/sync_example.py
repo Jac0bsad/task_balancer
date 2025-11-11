@@ -1,66 +1,73 @@
 import asyncio
 import random
 import time
+from typing import Dict, Any
 from task_balancer.manager import AsyncTaskQueueManager
+from task_balancer.utils.log_helper import logger
 
 
-def mock_sync_task(server_id: str, task_data: str, delay: float = 1.0) -> str:
+def simulated_sync_task(**kwargs) -> Dict[str, Any]:
     """
-    模拟同步任务，有一定概率失败
+    模拟同步任务函数
     """
-    # 模拟处理时间
-    time.sleep(delay)
+    server_id = kwargs.get("server_id")
+    data = kwargs.get("data", {})
+    task_id = kwargs.get("task_id", "unknown")
 
-    # 15% 概率失败
-    if random.random() < 0.15:
-        raise Exception(f"模拟同步任务在服务器 {server_id} 上失败")
+    # 模拟处理时间 (1-3秒)
+    process_time = random.uniform(1.0, 3.0)
+    time.sleep(process_time)
 
-    return f"同步任务 '{task_data}' 在服务器 {server_id} 上成功完成"
+    # 模拟5%的失败率
+    if random.random() < 0.05:
+        raise Exception("模拟同步任务失败: %s" % task_id)
+
+    result = {
+        "task_id": task_id,
+        "server_id": server_id,
+        "processed_data": "sync_processed_%s" % data.get('value', 0),
+        "process_time": process_time,
+        "timestamp": time.time(),
+    }
+
+    return result
 
 
-async def sync_task_example():
+async def demo_sync_tasks():
     """
-    同步任务使用示例
+    演示同步任务管理器的使用
     """
-    print("\n🔄 开始同步任务示例")
+    logger.info("🚀 开始同步任务管理器演示")
 
     manager = AsyncTaskQueueManager(
-        task_function=mock_sync_task,
+        task_function=simulated_sync_task,
         server_param_name="server_id",
-        available_server_ids=["server_A", "server_B"],
-        max_parallel_tasks=10,
+        available_server_ids=["sync_server_01", "sync_server_02"],
+        max_parallel_tasks=2,
         max_retries=1,
     )
 
-    # 启动管理器
-    await manager.start()
-
     try:
-        # 准备任务列表
-        tasks = [{"task_data": f"同步任务_{i}", "delay": 2} for i in range(50)]
+        await manager.start()
 
-        # 并行提交所有任务
-        async_tasks = [
-            manager.submit_single_task(task_args, f"task_{i+1}")
-            for i, task_args in enumerate(tasks)
-        ]
+        # 提交同步任务
+        sync_tasks = [{"data": {"value": i, "type": "sync"}} for i in range(4)]
+        task_ids = await manager.submit_tasks(sync_tasks)
 
-        results = await asyncio.gather(*async_tasks, return_exceptions=True)
+        logger.info("✅ 提交 %d 个同步任务", len(task_ids))
 
-        # 处理结果
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                print(f"❌ 任务 {i+1} 失败: {result}")
-            else:
-                print(f"✅ 任务 {i+1} 成功: {result}")
+        # 等待完成
+        await manager.wait_for_completion(timeout=10.0)
+
+        # 显示结果
+        for task_id in task_ids:
+            status = manager.get_task_status(task_id)
+            logger.info("同步任务 %s: %s", task_id, status.value)
 
     finally:
         await manager.stop()
-
-
-async def main():
-    await sync_task_example()
+        logger.info("🛑 同步任务演示结束")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(demo_sync_tasks())

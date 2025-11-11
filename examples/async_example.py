@@ -1,94 +1,134 @@
 import asyncio
 import random
 import time
-from task_balancer.manager import AsyncTaskQueueManager
+from typing import Dict, Any
+from task_balancer.manager import AsyncTaskQueueManager, TaskStatus
+from task_balancer.utils.log_helper import logger
 
 
-async def mock_async_task(server_id: str, task_data: str, delay: float = 1.0) -> str:
+# 模拟任务函数
+async def simulated_async_task(**kwargs) -> Dict[str, Any]:
     """
-    模拟异步任务，有一定概率失败
+    模拟异步任务函数
     """
-    # 模拟网络延迟
-    await asyncio.sleep(delay)
+    server_id = kwargs.get("server_id")
+    data = kwargs.get("data", {})
+    task_id = kwargs.get("task_id", "unknown")
 
-    # 10% 概率失败
+    # 模拟处理时间 (1-5秒)
+    process_time = random.uniform(1.0, 5.0)
+
+    # 模拟10%的失败率
     if random.random() < 0.1:
-        raise Exception(f"模拟任务在服务器 {server_id} 上失败")
+        await asyncio.sleep(process_time)
+        raise Exception(f"模拟任务失败: {task_id}")
 
-    return f"任务 '{task_data}' 在服务器 {server_id} 上成功完成"
+    await asyncio.sleep(process_time)
+
+    result = {
+        "task_id": task_id,
+        "server_id": server_id,
+        "processed_data": f"processed_{data.get('value', 0)}",
+        "process_time": process_time,
+        "timestamp": time.time(),
+    }
+
+    return result
 
 
-async def basic_usage_example():
+async def demo_async_tasks():
     """
-    基础使用示例：演示如何创建和管理任务队列
+    演示异步任务管理器的完整使用流程
     """
-    print("🚀 开始基础使用示例")
+    logger.info("🚀 开始异步任务管理器演示")
 
-    # 创建任务管理器
+    # 1. 初始化管理器
     manager = AsyncTaskQueueManager(
-        task_function=mock_async_task,
+        task_function=simulated_async_task,
         server_param_name="server_id",
-        available_server_ids=["server_1", "server_2", "server_3", "server_4"],
-        max_parallel_tasks=3,  # 限制最大并行任务数
+        available_server_ids=["server_01", "server_02", "server_03", "server_04"],
+        max_parallel_tasks=3,  # 最大并行任务数
         max_retries=2,  # 最大重试次数
     )
 
-    # 启动管理器
-    await manager.start()
-
-    # 创建一批测试任务
-    tasks = [
-        {"task_data": f"任务_{i}", "delay": random.uniform(0.5, 2.0)} for i in range(100)
-    ]
-
-    print(f"📤 提交 {len(tasks)} 个任务...")
-
-    # 并行提交所有任务
-    async_tasks = [
-        manager.submit_single_task(task_args, f"task_{i+1}")
-        for i, task_args in enumerate(tasks)
-    ]
-
-    results = await asyncio.gather(*async_tasks, return_exceptions=True)
-
-    # 处理结果
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            print(f"❌ 任务 {i+1} 失败: {result}")
-        else:
-            print(f"✅ 任务 {i+1} 成功: {result}")
-
-    # 显示最终状态
-    print("\n📊 最终状态统计:")
-    server_status = manager.get_server_status()
-    for server_id, status in server_status.items():
-        print(
-            f"  服务器 {server_id}: {status['total_completed']} 完成, "
-            f"{status['error_count']} 错误, {status['active_tasks']} 活跃"
-        )
-
-    # 停止管理器
-    await manager.stop()
-    print("🏁 基础使用示例完成")
-
-
-async def main():
-    """
-    主函数：运行所有示例
-    """
-    print("=" * 60)
-    print("🎯 Task Balancer 基础使用示例")
-    print("=" * 60)
-
     try:
-        # 运行基础使用示例
-        await basic_usage_example()
+        # 2. 启动管理器
+        await manager.start()
+        logger.info("✅ 任务管理器启动成功")
+
+        # 3. 分批提交任务
+        logger.info("📤 开始分批提交任务...")
+
+        # 第一批任务
+        batch1_tasks = [{"data": {"value": i, "batch": 1}} for i in range(5)]
+        batch1_ids = await manager.submit_tasks(batch1_tasks)
+        logger.info("✅ 第一批提交 %d 个任务", len(batch1_ids))
+
+        # 等待第一批任务部分完成
+        await asyncio.sleep(2)
+
+        # 第二批任务
+        batch2_tasks = [{"data": {"value": i, "batch": 2}} for i in range(5, 10)]
+        batch2_ids = await manager.submit_tasks(batch2_tasks)
+        logger.info("✅ 第二批提交 %d 个任务", len(batch2_ids))
+
+        # 第三批任务（单个任务提交）
+        single_task_id = await manager.submit_single_task(
+            {"data": {"value": 99, "batch": "single"}}
+        )
+        logger.info("✅ 单个任务提交: %s", single_task_id)
+
+        # 4. 等待所有任务完成（最多等待30秒）
+        logger.info("⏳ 等待所有任务完成...")
+        all_completed = await manager.wait_for_completion(timeout=30.0)
+
+        if all_completed:
+            logger.info("🎉 所有任务已完成!")
+        else:
+            logger.warning("⚠️  任务等待超时，部分任务可能仍在运行")
+
+        # 5. 获取并显示任务结果
+        logger.info("📊 任务结果统计:")
+
+        successful_tasks = 0
+        failed_tasks = 0
+
+        for task_id in batch1_ids + batch2_ids + [single_task_id]:
+            try:
+                if manager.get_task_status(task_id) == TaskStatus.COMPLETED:
+                    result = await manager.get_task_result(task_id)
+                    logger.info(
+                        "✅ 任务 %s: 成功 - %s", task_id, result["processed_data"]
+                    )
+                    successful_tasks += 1
+                else:
+                    logger.info("❌ 任务 %s: 失败", task_id)
+                    failed_tasks += 1
+            except Exception as e:
+                logger.error("⚠️  获取任务 %s 结果时出错: %s", task_id, e)
+                failed_tasks += 1
+
+        logger.info("📈 任务完成情况: %d 成功, %d 失败", successful_tasks, failed_tasks)
+
+        # 6. 显示服务器统计信息
+        server_status = manager.get_server_status()
+        logger.info("🖥️  服务器统计:")
+        for server_id, stats in server_status.items():
+            logger.info(
+                "   %s: %d 完成, %d 错误, %d 活跃",
+                server_id,
+                stats["total_completed"],
+                stats["error_count"],
+                stats["active_tasks"],
+            )
 
     except Exception as e:
-        print(f"💥 示例运行出错: {e}")
-        raise
+        logger.error("💥 演示过程中出错: %s", e)
+    finally:
+        # 7. 停止管理器
+        await manager.stop()
+        logger.info("🛑 演示结束")
 
 
 if __name__ == "__main__":
-    # 运行所有示例
-    asyncio.run(main())
+    asyncio.run(demo_async_tasks())

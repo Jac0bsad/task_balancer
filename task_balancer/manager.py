@@ -465,3 +465,23 @@ class AsyncTaskQueueManager:
     def has_pending_tasks(self) -> bool:
         """检查是否有待处理任务"""
         return len(self._pending_tasks) > 0
+
+    async def wait_for_idle_server(self, timeout: Optional[float] = None) -> int:
+        """
+        等待直到存在空闲服务器（当前运行任务数 < max_parallel_tasks）。
+        返回可用的任务名额数量（>=1）。如超时则返回 0。
+        """
+        if not self._is_running:
+            raise RuntimeError("任务管理器未启动")
+
+        start = time.time()
+        while True:
+            active = self.get_active_task_count()
+            if active < self.max_parallel_tasks:
+                return self.max_parallel_tasks - active
+
+            if timeout is not None and (time.time() - start) > timeout:
+                logger.warning("⏰ 等待空闲服务器超时")
+                return 0
+
+            await asyncio.sleep(1)

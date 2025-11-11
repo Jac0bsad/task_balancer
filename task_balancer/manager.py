@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 import concurrent.futures
+from tqdm import tqdm
 from task_balancer.utils.log_helper import logger
 
 
@@ -12,7 +13,6 @@ class TaskStatus(Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
-    WAITING_FOR_RESOURCE = "waiting_for_resource"
 
 
 @dataclass
@@ -48,10 +48,6 @@ class AsyncTaskQueueManager:
         self.tasks: Dict[str, TaskInfo] = {}
         self._task_id_counter = 0
 
-        # 重试管理
-        self._retry_queue: asyncio.Queue = asyncio.Queue()
-        self._retry_event = asyncio.Event()  # 用于通知有任务完成
-
         # 服务器状态
         self.server_stats = {server_id: 0 for server_id in available_server_ids}
         self.server_active_tasks = {server_id: 0 for server_id in available_server_ids}
@@ -62,16 +58,28 @@ class AsyncTaskQueueManager:
         self._thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_parallel_tasks
         )
-        self._retry_monitor_task: Optional[asyncio.Task] = None
         self._is_running = False
 
+        # tqdm 相关
+        self._pbar = None  # type: ignore
+        self._start_time: Optional[float] = None
+
     async def start(self):
-        """启动重试监控器"""
+        """启动任务管理器"""
         if self._is_running:
             return
 
         self._is_running = True
-        self._retry_monitor_task = asyncio.create_task(self._retry_monitor_loop())
+        self._start_time = time.time()
+        # 始终初始化 tqdm 进度条
+        self._pbar = tqdm(
+            total=len(self.tasks),
+            unit="task",
+            dynamic_ncols=True,
+            desc="Tasks",
+            leave=True,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_inv_fmt}] {postfix}",
+        )
         logger.info("🔧 任务管理器已启动")
 
     async def stop(self):
@@ -80,13 +88,40 @@ class AsyncTaskQueueManager:
             return
 
         self._is_running = False
-        if self._retry_monitor_task:
-            self._retry_monitor_task.cancel()
-            try:
-                await self._retry_monitor_task
-            except asyncio.CancelledError:
-                pass
+
+        # 等待短时间以便重试任务收敛（避免未完成导致进度非100%）
+        await self._wait_until_finished(timeout=60.0)
+
+        # 最终刷新 tqdm 至完成（按“已结束=成功或失败”计数）
+        if self._pbar is not None:
+            total = len(self.tasks)
+            finished = self._count_finished_tasks()
+            active_count = self.get_active_task_count()
+            self._pbar.total = total
+            self._pbar.n = finished
+            self._pbar.set_postfix({"running": active_count})
+            self._pbar.refresh()
+
+        # 输出最终状态统计
+        server_status = self.get_server_status()
+        summary_lines = ["📊 最终状态统计:"]
+        for server_id in self.available_server_ids:
+            s = server_status[server_id]
+            summary_lines.append(
+                f"  服务器 {server_id}: {s['total_completed']} 完成, {s['error_count']} 错误, {s['active_tasks']} 活跃"
+            )
+        logger.info("\n".join(summary_lines))
+
+        # 关闭线程池
         self._thread_pool.shutdown(wait=True)
+
+        # 关闭 tqdm 进度条
+        if self._pbar is not None:
+            try:
+                self._pbar.close()
+            finally:
+                self._pbar = None
+
         logger.info("🔧 任务管理器已停止")
 
     async def submit_single_task(
@@ -106,26 +141,16 @@ class AsyncTaskQueueManager:
         task_info = TaskInfo(id=task_id, kwargs=task_kwargs, status=TaskStatus.PENDING)
         self.tasks[task_id] = task_info
 
+        # 新任务加入后，更新 tqdm 总量
+        self._pbar.total = len(self.tasks)
+        self._pbar.refresh()
+
         logger.info("📤 提交任务 %s", task_id)
         await self._print_status()
 
-        try:
-            # 获取信号量，但不要持有它等待重试
-            await self._semaphore.acquire()
-            try:
-                result = await self._execute_task_with_smart_retry(task_info)
-                return result
-            finally:
-                # 确保信号量被释放
-                self._semaphore.release()
-        except Exception as e:
-            task_info.status = TaskStatus.FAILED
-            task_info.error = e
-            task_info.end_time = time.time()
-            # 确保信号量被释放
-            if self._semaphore.locked():
-                self._semaphore.release()
-            raise e
+        # 使用上下文管理信号量，确保自动释放
+        async with self._semaphore:
+            return await self._execute_task_with_smart_retry(task_info)
 
     async def _execute_task_with_smart_retry(self, task_info: TaskInfo) -> Any:
         """执行任务，使用智能重试策略"""
@@ -150,29 +175,33 @@ class AsyncTaskQueueManager:
                     task_info.status = TaskStatus.FAILED
                     task_info.error = e
                     task_info.end_time = time.time()
-                    self.server_error_count[task_info.server_id] += 1
+                    # 统计错误次数（若 server_id 已有值）
+                    if task_info.server_id in self.server_error_count:
+                        self.server_error_count[task_info.server_id] += 1
                     logger.info("💥 任务 %s 最终失败", task_info.id)
                     await self._print_status()
                     raise e
 
-                # 将任务加入重试队列，等待有任务完成
-                task_info.status = TaskStatus.WAITING_FOR_RESOURCE
-                await self._retry_queue.put(task_info)
-                logger.info(
-                    "🔄 任务 %s 加入重试队列 (重试 %d/%d)",
-                    task_info.id,
-                    task_info.retry_count,
-                    self.max_retries,
-                )
-                await self._print_status()
-
-                # 释放信号量，等待有任务完成（资源释放）
-                self._semaphore.release()
-                try:
-                    await self._wait_for_task_completion()
-                finally:
-                    # 重新获取信号量继续执行
-                    await self._semaphore.acquire()
+                # 优先在其他服务器上立刻重试，避免长时间等待
+                other_servers = [
+                    s
+                    for s in self.available_server_ids
+                    if s != task_info.last_failed_server
+                ]
+                if other_servers:
+                    logger.info(
+                        "🔁 任务 %s 切换服务器重试 (第 %d/%d 次)",
+                        task_info.id,
+                        task_info.retry_count,
+                        self.max_retries,
+                    )
+                    # 轻微退避，给事件循环机会处理其他任务
+                    await asyncio.sleep(0.05)
+                    continue
+                else:
+                    # 仅有单台服务器时，做一点退避再重试
+                    await asyncio.sleep(min(0.5, 0.1 * task_info.retry_count))
+                    continue
 
     async def _execute_single_attempt(
         self, task_info: TaskInfo, server_id: str, original_kwargs: Dict
@@ -201,7 +230,7 @@ class AsyncTaskQueueManager:
             if asyncio.iscoroutinefunction(self.task_function):
                 result = await self.task_function(**task_kwargs)
             else:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     self._thread_pool, lambda: self.task_function(**task_kwargs)
                 )
@@ -215,8 +244,6 @@ class AsyncTaskQueueManager:
             duration = task_info.end_time - task_info.start_time
             logger.info("✅ 任务 %s 完成 (耗时: %.2fs)", task_info.id, duration)
 
-            # 通知重试监控器有任务完成
-            self._signal_task_completion()
             await self._print_status()
 
             return result
@@ -233,67 +260,57 @@ class AsyncTaskQueueManager:
                     0, self.server_active_tasks[server_id] - 1
                 )
 
-    def _signal_task_completion(self):
-        """通知有任务完成（资源释放）"""
-        self._retry_event.set()
-        # 不要立即清除，让等待的任务有机会处理
-        # 清除操作将在等待任务处理完成后进行
+    def _count_completed_tasks(self) -> int:
+        """统计已完成任务数量（以任务最终状态为准）"""
+        return sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
 
-    async def _wait_for_task_completion(self):
-        """等待有任务完成（资源释放）"""
-        logger.info("⏳ 等待其他任务完成释放资源...")
+    def _count_finished_tasks(self) -> int:
+        """统计已结束任务数量（成功或失败）"""
+        return sum(
+            1
+            for t in self.tasks.values()
+            if t.status in (TaskStatus.COMPLETED, TaskStatus.FAILED)
+        )
 
-        # 设置超时机制，避免永久等待
-        try:
-            await asyncio.wait_for(self._retry_event.wait(), timeout=30.0)
-            # 事件被触发后，清除它以便下次使用
-            self._retry_event.clear()
-        except asyncio.TimeoutError:
-            logger.warning("⏰ 等待资源超时，强制继续执行")
-            # 超时后强制清除事件，避免死锁
-            self._retry_event.clear()
-            # 检查是否有其他任务在运行，如果没有，可能是系统空闲状态
-            if self.get_active_task_count() == 0:
-                logger.info("💡 系统空闲，无需等待资源")
+    async def _print_status(self):
+        """打印当前各服务器状态"""
+        active_count = self.get_active_task_count()
+        server_status = self.get_server_status()
+        total_tasks = len(self.tasks)
+        completed_tasks = self._count_completed_tasks()
+        finished_tasks = self._count_finished_tasks()
 
-    async def _retry_monitor_loop(self):
-        """重试监控循环，处理等待重试的任务"""
-        while self._is_running:
-            try:
-                # 检查重试队列是否有任务
-                if not self._retry_queue.empty():
-                    # 有任务等待重试，检查是否有可用资源
-                    if self.get_active_task_count() < self.max_parallel_tasks:
-                        # 有可用资源，尝试处理重试队列中的任务
-                        try:
-                            task_info = self._retry_queue.get_nowait()
-                            # 重新提交任务进行重试
-                            asyncio.create_task(self._retry_task(task_info))
-                        except asyncio.QueueEmpty:
-                            pass
-                    else:
-                        # 没有可用资源，等待
-                        await asyncio.sleep(0.1)
-                else:
-                    # 没有任务等待重试，稍作等待
-                    await asyncio.sleep(0.5)
+        # 用“已结束=完成+失败”驱动 tqdm
+        self._pbar.total = total_tasks
+        self._pbar.n = finished_tasks
 
-            except Exception as e:
-                logger.info("重试监控器错误: %s", e)
-                continue
+        # 保留运行中/等待数
+        self._pbar.set_postfix({"running": active_count})
+        self._pbar.refresh()
 
-    async def _retry_task(self, task_info: TaskInfo):
-        """处理重试任务"""
-        try:
-            # 重新执行任务
-            await self._execute_task_with_smart_retry(task_info)
-        except Exception as e:
-            # 重试失败，任务最终失败
-            task_info.status = TaskStatus.FAILED
-            task_info.error = e
-            task_info.end_time = time.time()
-            logger.info("💥 任务 %s 最终失败", task_info.id)
-            await self._print_status()
+        # 文本状态（不包含进度条）
+        status_msg = "\n=== 系统状态 ==="
+        status_msg += f"\n活跃任务: {active_count}, 最大并行: {self.max_parallel_tasks}"
+        for server_id, status in server_status.items():
+            status_msg += (
+                f"\n服务器 {server_id}: {status['active_tasks']}活跃, "
+                f"{status['total_completed']}完成, {status['error_count']}错误"
+            )
+        status_msg += f"\n总任务数: {total_tasks}"
+        status_msg += f"\n总完成数: {completed_tasks}"
+        status_msg += "\n" + "=" * 40
+        logger.info(status_msg)
+
+    async def _wait_until_finished(self, timeout: float = 60.0) -> None:
+        """等待所有任务进入终态（完成或失败），或超时"""
+        end = time.time() + timeout
+        while time.time() < end:
+            if (
+                self._count_finished_tasks() >= len(self.tasks)
+                and self.get_active_task_count() == 0
+            ):
+                break
+            await asyncio.sleep(0.1)
 
     def _get_optimal_server(self, exclude_server: str = None) -> str:
         """选择最优服务器（考虑错误率和活跃任务数）"""
@@ -319,13 +336,6 @@ class AsyncTaskQueueManager:
             1 for task in self.tasks.values() if task.status == TaskStatus.RUNNING
         )
 
-    def get_waiting_task_count(self) -> int:
-        return sum(
-            1
-            for task in self.tasks.values()
-            if task.status == TaskStatus.WAITING_FOR_RESOURCE
-        )
-
     def get_server_status(self) -> Dict[str, Dict]:
         return {
             server_id: {
@@ -335,53 +345,3 @@ class AsyncTaskQueueManager:
             }
             for server_id in self.available_server_ids
         }
-
-    def _count_completed_tasks(self) -> int:
-        """统计已完成任务数量（以任务最终状态为准）"""
-        return sum(1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED)
-
-    @staticmethod
-    def _format_progress_bar(current: int, total: int, width: int = 30) -> str:
-        """格式化 tqdm 风格进度条。
-
-        - current: 已完成数量
-        - total: 总数量（0 时返回空进度条）
-        - width: 进度条宽度
-        """
-        if total <= 0:
-            return "|" + "-" * width + "| 0.0% (0/0)"
-
-        ratio = max(0.0, min(1.0, current / total))
-        filled = int(round(width * ratio))
-        p_bar = "|" + "█" * filled + "-" * (width - filled) + "|"
-        percent = ratio * 100
-        return f"{p_bar} {percent:5.1f}% ({current}/{total})"
-
-    async def _print_status(self):
-        """打印当前状态"""
-        active_count = self.get_active_task_count()
-        waiting_count = self.get_waiting_task_count()
-        server_status = self.get_server_status()
-        total_tasks = len(self.tasks)
-        completed_tasks = self._count_completed_tasks()
-
-        status_msg = "\n=== 系统状态 ==="
-        status_msg += f"\n活跃任务: {active_count}, 等待重试: {waiting_count}, 最大并行: {self.max_parallel_tasks}"
-
-        for server_id, status in server_status.items():
-            status_msg += (
-                f"\n服务器 {server_id}: {status['active_tasks']}活跃, "
-                f"{status['total_completed']}完成, {status['error_count']}错误"
-            )
-
-        # 汇总与进度
-        status_msg += f"\n总任务数: {total_tasks}"
-        status_msg += f"\n总完成数: {completed_tasks}"
-        status_msg += "\n进度: " + self._format_progress_bar(
-            completed_tasks, total_tasks, width=30
-        )
-        status_msg += "\n" + "=" * 40
-        logger.info(status_msg)
-
-    def get_task_info(self, task_id: str) -> Optional[TaskInfo]:
-        return self.tasks.get(task_id)

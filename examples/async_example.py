@@ -38,7 +38,7 @@ async def basic_usage_example():
 
     # 创建一批测试任务
     tasks = [
-        {"task_data": f"任务_{i}", "delay": random.uniform(0.5, 2.0)} for i in range(10)
+        {"task_data": f"任务_{i}", "delay": random.uniform(0.5, 2.0)} for i in range(100)
     ]
 
     print(f"📤 提交 {len(tasks)} 个任务...")

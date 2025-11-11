@@ -37,7 +37,7 @@ async def sync_task_example():
 
     try:
         # 准备任务列表
-        tasks = [{"task_data": f"同步任务_{i}", "delay": 2} for i in range(5)]
+        tasks = [{"task_data": f"同步任务_{i}", "delay": 2} for i in range(50)]
 
         # 并行提交所有任务
         async_tasks = [

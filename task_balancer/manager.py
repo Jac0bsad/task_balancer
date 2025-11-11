@@ -107,7 +107,7 @@ class AsyncTaskQueueManager:
                 pass
 
         # 等待所有任务完成或超时
-        await self._wait_until_finished(timeout=60.0)
+        await self._wait_until_finished(timeout=None)
 
         # 最终刷新 tqdm
         if self._pbar is not None:
@@ -402,16 +402,25 @@ class AsyncTaskQueueManager:
         status_msg += "\n" + "=" * 40
         logger.info(status_msg)
 
-    async def _wait_until_finished(self, timeout: float = 60.0) -> None:
+    async def _wait_until_finished(self, timeout: Optional[float] = None) -> None:
         """等待所有任务进入终态（完成或失败），或超时"""
-        end = time.time() + timeout
-        while time.time() < end:
-            if (
-                self._count_finished_tasks() >= len(self.tasks)
-                and self.get_active_task_count() == 0
-            ):
-                break
-            await asyncio.sleep(0.1)
+        if timeout is None:
+            while True:
+                if (
+                    self._count_finished_tasks() >= len(self.tasks)
+                    and self.get_active_task_count() == 0
+                ):
+                    break
+                await asyncio.sleep(0.1)
+        else:
+            end = time.time() + timeout
+            while time.time() < end:
+                if (
+                    self._count_finished_tasks() >= len(self.tasks)
+                    and self.get_active_task_count() == 0
+                ):
+                    break
+                await asyncio.sleep(0.1)
 
     def _get_optimal_server(self, exclude_server: str = None) -> str:
         """选择最优服务器（考虑错误率和活跃任务数）"""

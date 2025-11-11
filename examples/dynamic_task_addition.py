@@ -135,4 +135,4 @@ async def demo_dynamic_task_addition_2():
 
 
 if __name__ == "__main__":
-    asyncio.run(demo_dynamic_task_addition())
+    asyncio.run(demo_dynamic_task_addition_2())

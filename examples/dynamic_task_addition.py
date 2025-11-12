@@ -106,6 +106,7 @@ async def demo_dynamic_task_addition_2():
         available_server_ids=["dynamic_01", "dynamic_02"],
         max_parallel_tasks=20,
         max_retries=2,
+        max_completed_tasks_to_keep=1
     )
 
     try:
@@ -122,12 +123,12 @@ async def demo_dynamic_task_addition_2():
 
         while True:
             await add_tasks()
-            await asyncio.sleep(0.1)  # 退出事件循环，触发任务调度
+            await asyncio.sleep(1)  # 退出事件循环，触发任务调度
             active_task = manager.get_active_task_count()
             logger.info("📊 当前活跃任务数: %d", active_task)
             if active_task < 0:
                 await add_tasks()
-            if active_task > 15:
+            if manager._completed_total > 50:
                 break
 
     finally:

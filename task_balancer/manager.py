@@ -1,4 +1,5 @@
 from typing import Any, List, Callable, Dict, Optional, Set
+from collections import deque
 import asyncio
 import time
 from dataclasses import dataclass
@@ -39,12 +40,15 @@ class AsyncTaskQueueManager:
         available_server_ids: List[Any],
         max_parallel_tasks: int = 20,
         max_retries: int = 3,
+        max_completed_tasks_to_keep: Optional[int] = None,
     ):
         self.task_function = task_function
         self.server_param_name = server_param_name
         self.available_server_ids = available_server_ids
         self.max_parallel_tasks = max_parallel_tasks
         self.max_retries = max_retries
+        # 最大保留的“已完成任务”数量（仅成功的）。None 表示不限制；<=0 表示不保留。
+        self.max_completed_tasks_to_keep = max_completed_tasks_to_keep
 
         # 任务管理
         self.tasks: Dict[str, TaskInfo] = {}
@@ -67,6 +71,13 @@ class AsyncTaskQueueManager:
         # tqdm 相关
         self._pbar = None  # type: ignore
         self._start_time: Optional[float] = None
+        # 记录完成顺序的任务ID（仅成功任务）
+        self._completed_task_ids = deque()
+        # 全局进度统计（避免被清理影响展示）
+        self._total_submitted = 0
+        self._completed_total = 0
+        self._failed_total = 0
+        self._finished_total = 0
 
     async def start(self):
         """启动任务管理器"""
@@ -78,7 +89,7 @@ class AsyncTaskQueueManager:
 
         # 初始化 tqdm 进度条
         self._pbar = tqdm(
-            total=len(self.tasks),
+            total=self._total_submitted,
             unit="task",
             dynamic_ncols=True,
             desc="Tasks",
@@ -111,8 +122,8 @@ class AsyncTaskQueueManager:
 
         # 最终刷新 tqdm
         if self._pbar is not None:
-            total = len(self.tasks)
-            finished = self._count_finished_tasks()
+            total = self._total_submitted
+            finished = self._finished_total
             active_count = self.get_active_task_count()
             self._pbar.total = total
             self._pbar.n = finished
@@ -159,13 +170,16 @@ class AsyncTaskQueueManager:
             self._pending_tasks.add(task_id)
             task_ids.append(task_id)
 
+        # 统计累计提交数量
+        self._total_submitted += len(tasks_kwargs)
+
         # 更新 tqdm 总量
         if self._pbar is not None:
-            self._pbar.total = len(self.tasks)
+            self._pbar.total = self._total_submitted
             self._pbar.refresh()
 
         logger.info(
-            "📤 提交 %d 个任务，总任务数: %d", len(tasks_kwargs), len(self.tasks)
+            "📤 提交 %d 个任务，总任务数: %d", len(tasks_kwargs), self._total_submitted
         )
         await self._print_status()
 
@@ -190,7 +204,10 @@ class AsyncTaskQueueManager:
         start_time = time.time()
         while True:
             # 检查是否所有任务都已完成
-            if self._count_finished_tasks() == len(self.tasks):
+            if (
+                self._finished_total >= self._total_submitted
+                and self.get_active_task_count() == 0
+            ):
                 return True
 
             # 检查超时
@@ -204,7 +221,7 @@ class AsyncTaskQueueManager:
     async def get_task_result(self, task_id: str) -> Any:
         """获取任务结果，如果任务未完成会等待"""
         if task_id not in self.tasks:
-            raise ValueError(f"任务ID {task_id} 不存在")
+            raise ValueError(f"任务ID {task_id} 不存在或已被清理")
 
         task_info = self.tasks[task_id]
 
@@ -279,6 +296,8 @@ class AsyncTaskQueueManager:
                         # 统计错误次数（若 server_id 已有值）
                         if task_info.server_id in self.server_error_count:
                             self.server_error_count[task_info.server_id] += 1
+                        # 更新最终失败统计
+                        self._on_task_failed(task_info)
                         logger.info("💥 任务 %s 最终失败", task_info.id)
                         await self._print_status()
                         raise e
@@ -342,6 +361,11 @@ class AsyncTaskQueueManager:
             task_info.end_time = time.time()
             self.server_stats[server_id] += 1
 
+            # 标记完成并按配置清理多余的已完成任务
+            self._on_task_completed(task_info)
+            self._completed_total += 1
+            self._finished_total += 1
+
             duration = task_info.end_time - task_info.start_time
             logger.info("✅ 任务 %s 完成 (耗时: %.2fs)", task_info.id, duration)
 
@@ -377,14 +401,11 @@ class AsyncTaskQueueManager:
         """打印当前各服务器状态"""
         active_count = self.get_active_task_count()
         server_status = self.get_server_status()
-        total_tasks = len(self.tasks)
-        completed_tasks = self._count_completed_tasks()
-        finished_tasks = self._count_finished_tasks()
 
-        # 用"已结束=完成+失败"驱动 tqdm
+        # 用"已结束=完成+失败"驱动 tqdm（使用全局计数，避免清理影响）
         if self._pbar is not None:
-            self._pbar.total = total_tasks
-            self._pbar.n = finished_tasks
+            self._pbar.total = self._total_submitted
+            self._pbar.n = self._finished_total
             self._pbar.set_postfix({"running": active_count})
             self._pbar.refresh()
 
@@ -397,8 +418,10 @@ class AsyncTaskQueueManager:
                 f"\n服务器 {server_id}: {status['active_tasks']}活跃, "
                 f"{status['total_completed']}完成, {status['error_count']}错误"
             )
-        status_msg += f"\n总任务数: {total_tasks}"
-        status_msg += f"\n总完成数: {completed_tasks}"
+        status_msg += f"\n总任务数: {self._total_submitted}"
+        status_msg += (
+            f"\n总完成数: {self._completed_total} (失败: {self._failed_total})"
+        )
         status_msg += "\n" + "=" * 40
         logger.info(status_msg)
 
@@ -407,7 +430,7 @@ class AsyncTaskQueueManager:
         if timeout is None:
             while True:
                 if (
-                    self._count_finished_tasks() >= len(self.tasks)
+                    self._finished_total >= self._total_submitted
                     and self.get_active_task_count() == 0
                 ):
                     break
@@ -416,7 +439,7 @@ class AsyncTaskQueueManager:
             end = time.time() + timeout
             while time.time() < end:
                 if (
-                    self._count_finished_tasks() >= len(self.tasks)
+                    self._finished_total >= self._total_submitted
                     and self.get_active_task_count() == 0
                 ):
                     break
@@ -441,6 +464,40 @@ class AsyncTaskQueueManager:
             ),
         )
 
+    def _on_task_completed(self, task_info: TaskInfo) -> None:
+        """记录任务完成并执行必要的清理。仅针对成功任务。"""
+        self._completed_task_ids.append(task_info.id)
+        self._cleanup_completed_tasks()
+
+    def _cleanup_completed_tasks(self) -> None:
+        """清理超过上限的已完成任务（仅成功）。"""
+        limit = self.max_completed_tasks_to_keep
+        if limit is None:
+            return  # 不限制
+        # 将负数视为 0：不保留任何已完成任务
+        try:
+            keep = int(limit)
+        except Exception:
+            # 非法值时，忽略清理以避免误删
+            return
+        if keep < 0:
+            keep = 0
+
+        while len(self._completed_task_ids) > keep:
+            old_id = self._completed_task_ids.popleft()
+            old_info = self.tasks.get(old_id)
+            # 仅删除仍为 COMPLETED 的任务
+            if old_info and old_info.status == TaskStatus.COMPLETED:
+                try:
+                    del self.tasks[old_id]
+                except KeyError:
+                    pass
+
+    def _on_task_failed(self, _: TaskInfo) -> None:
+        """记录任务最终失败（仅在最终失败时调用）。"""
+        self._failed_total += 1
+        self._finished_total += 1
+
     def get_active_task_count(self) -> int:
         return sum(
             1 for task in self.tasks.values() if task.status == TaskStatus.RUNNING
@@ -459,7 +516,7 @@ class AsyncTaskQueueManager:
     def get_task_status(self, task_id: str) -> TaskStatus:
         """获取任务状态"""
         if task_id not in self.tasks:
-            raise ValueError(f"任务ID {task_id} 不存在")
+            raise ValueError(f"任务ID {task_id} 不存在或已被清理")
         return self.tasks[task_id].status
 
     def has_pending_tasks(self) -> bool:

@@ -1,8 +1,7 @@
-import asyncio
 import random
 import time
 from typing import Dict, Any
-from task_balancer.manager import AsyncTaskQueueManager
+from task_balancer.manager import TaskQueueManager
 from task_balancer.utils.log_helper import logger
 
 
@@ -33,13 +32,13 @@ def simulated_sync_task(**kwargs) -> Dict[str, Any]:
     return result
 
 
-async def demo_sync_tasks():
+def demo_sync_tasks():
     """
     演示同步任务管理器的使用
     """
     logger.info("🚀 开始同步任务管理器演示")
 
-    manager = AsyncTaskQueueManager(
+    manager = TaskQueueManager(
         task_function=simulated_sync_task,
         server_param_name="server_id",
         available_server_ids=["sync_server_01", "sync_server_02"],
@@ -48,16 +47,16 @@ async def demo_sync_tasks():
     )
 
     try:
-        await manager.start()
+        manager.start()
 
         # 提交同步任务
         sync_tasks = [{"data": {"value": i, "type": "sync"}} for i in range(4)]
-        task_ids = await manager.submit_tasks(sync_tasks)
+        task_ids = manager.submit_tasks(sync_tasks)
 
         logger.info("✅ 提交 %d 个同步任务", len(task_ids))
 
         # 等待完成
-        await manager.wait_for_completion(timeout=10.0)
+        manager.wait_for_completion(timeout=10.0)
 
         # 显示结果
         for task_id in task_ids:
@@ -65,9 +64,9 @@ async def demo_sync_tasks():
             logger.info("同步任务 %s: %s", task_id, status.value)
 
     finally:
-        await manager.stop()
+        manager.stop()
         logger.info("🛑 同步任务演示结束")
 
 
 if __name__ == "__main__":
-    asyncio.run(demo_sync_tasks())
+    demo_sync_tasks()

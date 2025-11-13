@@ -1,13 +1,12 @@
-import asyncio
 import random
 import time
 from typing import Dict, Any
-from task_balancer.manager import AsyncTaskQueueManager, TaskStatus
+from task_balancer.manager import TaskQueueManager, TaskStatus
 from task_balancer.utils.log_helper import logger
 
 
 # 模拟任务函数
-async def simulated_async_task(**kwargs) -> Dict[str, Any]:
+def simulated_task(**kwargs) -> Dict[str, Any]:
     """
     模拟异步任务函数
     """
@@ -17,13 +16,11 @@ async def simulated_async_task(**kwargs) -> Dict[str, Any]:
 
     # 模拟处理时间 (1-5秒)
     process_time = random.uniform(1.0, 5.0)
+    time.sleep(process_time)
 
     # 模拟10%的失败率
     if random.random() < 0.1:
-        await asyncio.sleep(process_time)
         raise Exception(f"模拟任务失败: {task_id}")
-
-    await asyncio.sleep(process_time)
 
     result = {
         "task_id": task_id,
@@ -36,15 +33,15 @@ async def simulated_async_task(**kwargs) -> Dict[str, Any]:
     return result
 
 
-async def demo_async_tasks():
+def demo_tasks():
     """
     演示异步任务管理器的完整使用流程
     """
     logger.info("🚀 开始异步任务管理器演示")
 
     # 1. 初始化管理器
-    manager = AsyncTaskQueueManager(
-        task_function=simulated_async_task,
+    manager = TaskQueueManager(
+        task_function=simulated_task,
         server_param_name="server_id",
         available_server_ids=["server_01", "server_02", "server_03", "server_04"],
         max_parallel_tasks=3,  # 最大并行任务数
@@ -53,7 +50,7 @@ async def demo_async_tasks():
 
     try:
         # 2. 启动管理器
-        await manager.start()
+        manager.start()
         logger.info("✅ 任务管理器启动成功")
 
         # 3. 分批提交任务
@@ -61,26 +58,26 @@ async def demo_async_tasks():
 
         # 第一批任务
         batch1_tasks = [{"data": {"value": i, "batch": 1}} for i in range(5)]
-        batch1_ids = await manager.submit_tasks(batch1_tasks)
+        batch1_ids = manager.submit_tasks(batch1_tasks)
         logger.info("✅ 第一批提交 %d 个任务", len(batch1_ids))
 
         # 等待第一批任务部分完成
-        await asyncio.sleep(2)
+        time.sleep(2)
 
         # 第二批任务
         batch2_tasks = [{"data": {"value": i, "batch": 2}} for i in range(5, 10)]
-        batch2_ids = await manager.submit_tasks(batch2_tasks)
+        batch2_ids = manager.submit_tasks(batch2_tasks)
         logger.info("✅ 第二批提交 %d 个任务", len(batch2_ids))
 
         # 第三批任务（单个任务提交）
-        single_task_id = await manager.submit_single_task(
+        single_task_id = manager.submit_single_task(
             {"data": {"value": 99, "batch": "single"}}
         )
         logger.info("✅ 单个任务提交: %s", single_task_id)
 
         # 4. 等待所有任务完成（最多等待30秒）
         logger.info("⏳ 等待所有任务完成...")
-        all_completed = await manager.wait_for_completion(timeout=30.0)
+        all_completed = manager.wait_for_completion(timeout=30.0)
 
         if all_completed:
             logger.info("🎉 所有任务已完成!")
@@ -96,7 +93,7 @@ async def demo_async_tasks():
         for task_id in batch1_ids + batch2_ids + [single_task_id]:
             try:
                 if manager.get_task_status(task_id) == TaskStatus.COMPLETED:
-                    result = await manager.get_task_result(task_id)
+                    result = manager.get_task_result(task_id)
                     logger.info(
                         "✅ 任务 %s: 成功 - %s", task_id, result["processed_data"]
                     )
@@ -126,9 +123,9 @@ async def demo_async_tasks():
         logger.error("💥 演示过程中出错: %s", e)
     finally:
         # 7. 停止管理器
-        await manager.stop()
+        manager.stop()
         logger.info("🛑 演示结束")
 
 
 if __name__ == "__main__":
-    asyncio.run(demo_async_tasks())
+    demo_tasks()

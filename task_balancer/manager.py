@@ -349,8 +349,6 @@ class TaskQueueManager:
 
                 # 标记完成并按配置清理多余的已完成任务
                 self._on_task_completed(task_info)
-                self._completed_total += 1
-                self._finished_total += 1
 
             duration = end_time - (task_info.start_time or end_time)
             logger.info("✅ 任务 %s 完成 (耗时: %.2fs)", task_info.id, duration)
@@ -373,14 +371,14 @@ class TaskQueueManager:
                         0, self.server_active_tasks[server_id] - 1
                     )
 
-    def _count_completed_tasks(self) -> int:
+    def count_completed_tasks(self) -> int:
         """统计已完成任务数量（以任务最终状态为准）"""
         with self._lock:
             return sum(
                 1 for t in self.tasks.values() if t.status == TaskStatus.COMPLETED
             )
 
-    def _count_finished_tasks(self) -> int:
+    def count_finished_tasks(self) -> int:
         """统计已结束任务数量（成功或失败）"""
         with self._lock:
             return sum(
@@ -468,6 +466,8 @@ class TaskQueueManager:
 
     def _on_task_completed(self, task_info: TaskInfo) -> None:
         """记录任务完成并执行必要的清理。仅针对成功任务。"""
+        self._completed_total += 1
+        self._finished_total += 1
         self._completed_task_ids.append(task_info.id)
         self._cleanup_completed_tasks()
 

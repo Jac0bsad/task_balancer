@@ -43,12 +43,16 @@ class TaskQueueManager:
         max_retries: int = 3,
         max_completed_tasks_to_keep: Optional[int] = None,
     ):
+        """
+        Args:
+            max_completed_tasks_to_keep: 最大保留的“已完成任务”数量（仅成功的）。None 表示不限制；<=0 表示不保留。
+                如果不限制，任务信息会随着时间累积，占用更多内存。
+        """
         self.task_function = task_function
         self.server_param_name = server_param_name
         self.available_server_ids = list(available_server_ids)
         self.max_parallel_tasks = max_parallel_tasks
         self.max_retries = max_retries
-        # 最大保留的“已完成任务”数量（仅成功的）。None 表示不限制；<=0 表示不保留。
         self.max_completed_tasks_to_keep = max_completed_tasks_to_keep
 
         # 任务管理
@@ -74,8 +78,7 @@ class TaskQueueManager:
         self._pbar_lock = threading.Lock()
 
         # tqdm 相关
-        self._pbar = None  # type: ignore
-        self._start_time: Optional[float] = None
+        self._pbar = None
         # 记录完成顺序的任务ID（仅成功任务）
         self._completed_task_ids = deque()
         # 全局进度统计（避免被清理影响展示）
@@ -90,7 +93,6 @@ class TaskQueueManager:
             if self._is_running:
                 return
             self._is_running = True
-            self._start_time = time.time()
 
             # 初始化 tqdm 进度条
             self._pbar = tqdm(
@@ -186,7 +188,9 @@ class TaskQueueManager:
         # 立即调度任务执行
         for task_id in task_ids:
             task_info = self.tasks[task_id]
-            future = self._executor.submit(self._execute_task_with_smart_retry, task_info)
+            future = self._executor.submit(
+                self._execute_task_with_smart_retry, task_info
+            )
             task_info.future = future
 
         return task_ids
@@ -527,9 +531,7 @@ class TaskQueueManager:
     def has_pending_tasks(self) -> bool:
         """检查是否有待处理任务"""
         with self._lock:
-            return any(
-                t.status == TaskStatus.PENDING for t in self.tasks.values()
-            )
+            return any(t.status == TaskStatus.PENDING for t in self.tasks.values())
 
     def wait_for_idle_server(self, timeout: Optional[float] = None) -> int:
         """

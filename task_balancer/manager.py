@@ -57,7 +57,7 @@ class TaskQueueManager:
 
         # 任务管理
         self.tasks: Dict[str, TaskInfo] = {}
-        self._task_id_counter = 0
+        self._task_cnt = 0
         self._pending_tasks: Set[str] = set()  # 待处理任务ID集合
 
         # 服务器状态
@@ -82,7 +82,6 @@ class TaskQueueManager:
         # 记录完成顺序的任务ID（仅成功任务）
         self._completed_task_ids = deque()
         # 全局进度统计（避免被清理影响展示）
-        self._total_submitted = 0
         self._completed_total = 0
         self._failed_total = 0
         self._finished_total = 0
@@ -96,7 +95,7 @@ class TaskQueueManager:
 
             # 初始化 tqdm 进度条
             self._pbar = tqdm(
-                total=self._total_submitted,
+                total=self._task_cnt,
                 unit="task",
                 dynamic_ncols=True,
                 desc="Tasks",
@@ -119,7 +118,7 @@ class TaskQueueManager:
         # 最终刷新 tqdm
         with self._pbar_lock:
             if self._pbar is not None:
-                total = self._total_submitted
+                total = self._task_cnt
                 finished = self._finished_total
                 active_count = self.get_active_task_count()
                 self._pbar.total = total
@@ -161,8 +160,8 @@ class TaskQueueManager:
 
             task_ids = []
             for kwargs in tasks_kwargs:
-                self._task_id_counter += 1
-                task_id = f"task_{self._task_id_counter}"
+                self._task_cnt += 1
+                task_id = f"task_{self._task_cnt}"
 
                 task_info = TaskInfo(
                     id=task_id, kwargs=kwargs, status=TaskStatus.PENDING
@@ -171,17 +170,14 @@ class TaskQueueManager:
                 self._pending_tasks.add(task_id)
                 task_ids.append(task_id)
 
-            # 统计累计提交数量
-            self._total_submitted += len(tasks_kwargs)
-
             # 更新 tqdm 总量
             with self._pbar_lock:
                 if self._pbar is not None:
-                    self._pbar.total = self._total_submitted
+                    self._pbar.total = self._task_cnt
                     self._pbar.refresh()
 
         logger.info(
-            "📤 提交 %d 个任务，总任务数: %d", len(tasks_kwargs), self._total_submitted
+            "📤 提交 %d 个任务，总任务数: %d", len(tasks_kwargs), self._task_cnt
         )
         self._print_status()
 
@@ -216,7 +212,7 @@ class TaskQueueManager:
             # 检查是否所有任务都已完成
             with self._lock:
                 finished_ok = (
-                    self._finished_total >= self._total_submitted
+                    self._finished_total >= self._task_cnt
                     and self.get_active_task_count() == 0
                 )
             if finished_ok:
@@ -398,10 +394,10 @@ class TaskQueueManager:
         with self._lock:
             active_count = self.get_active_task_count()
             server_status = self.get_server_status()
-            total_submitted = self._total_submitted
+            total_submitted = self._task_cnt
             finished_total = self._finished_total
 
-        # 用"已结束=完成+失败"驱动 tqdm（使用全局计数，避免清理影响）
+        # 用"已结束=完成+失败"驱动 tqdm（使用全局计数，避免清理任务造成影响）
         with self._pbar_lock:
             if self._pbar is not None:
                 self._pbar.total = total_submitted
@@ -409,7 +405,7 @@ class TaskQueueManager:
                 self._pbar.set_postfix({"running": active_count})
                 self._pbar.refresh()
 
-        # 文本状态（不包含进度条）
+        # 文本状态
         status_lines = [
             "\n=== 系统状态 ===",
             f"活跃任务: {active_count}, 最大并行: {self.max_parallel_tasks}",
@@ -433,7 +429,7 @@ class TaskQueueManager:
             while True:
                 with self._lock:
                     done = (
-                        self._finished_total >= self._total_submitted
+                        self._finished_total >= self._task_cnt
                         and self.get_active_task_count() == 0
                     )
                 if done:
@@ -444,7 +440,7 @@ class TaskQueueManager:
             while time.time() < end:
                 with self._lock:
                     done = (
-                        self._finished_total >= self._total_submitted
+                        self._finished_total >= self._task_cnt
                         and self.get_active_task_count() == 0
                     )
                 if done:

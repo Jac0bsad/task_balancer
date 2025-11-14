@@ -19,12 +19,12 @@ def simulated_sync_task(**kwargs) -> Dict[str, Any]:
 
     # 模拟5%的失败率
     if random.random() < 0.05:
-        raise Exception("模拟同步任务失败: %s" % task_id)
+        raise Exception(f"模拟同步任务失败: {task_id}")
 
     result = {
         "task_id": task_id,
         "server_id": server_id,
-        "processed_data": "sync_processed_%s" % data.get('value', 0),
+        "processed_data": f"sync_processed_{data.get('value', 0)}",
         "process_time": process_time,
         "timestamp": time.time(),
     }

@@ -284,7 +284,8 @@ class TaskQueueManager:
                             self.server_error_count[task_info.server_id] += 1
                         # 更新最终失败统计
                         self._on_task_failed(task_info)
-                        logger.info("💥 任务 %s 最终失败", task_info.id)
+                        # 记录最终失败时的 traceback，辅助调试
+                        logger.exception("💥 任务 %s 最终失败", task_info.id)
                         self._print_status()
                         raise
 

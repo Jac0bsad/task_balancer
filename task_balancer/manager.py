@@ -45,6 +45,7 @@ class TaskQueueManager:
     ):
         """
         Args:
+            available_server_ids: 可用服务器ID列表, 需要保证每个元素唯一且可哈希
             max_completed_tasks_to_keep: 最大保留的“已完成任务”数量（仅成功的）。None 表示不限制；<=0 表示不保留。
                 如果不限制，任务信息会随着时间累积，占用更多内存。
         """
